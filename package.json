@@ -1,0 +1,28 @@
+{
+  "name": "port-test-server",
+  "version": "1.0.0",
+  "description": "Comprehensive port testing and monitoring server with web dashboard",
+  "main": "src/port-test-server.js",
+  "scripts": {
+    "start": "node src/port-test-server.js",
+    "test": "python3 scripts/test-ports.py --common",
+    "dev": "PORT=9090 node src/port-test-server.js"
+  },
+  "keywords": [
+    "port",
+    "testing",
+    "network",
+    "monitoring",
+    "scanner",
+    "dashboard"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "ws": "^8.14.2"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}
