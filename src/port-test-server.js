@@ -470,7 +470,7 @@ class PortTestServer {
         `;
     }
 
-    async function startListening(port, protocol = 'http') {
+    startListening(port, protocol = 'http') {
         return new Promise((resolve, reject) => {
             if (this.servers[port]) {
                 return resolve({ success: false, error: 'Server already running on this port' });
@@ -531,7 +531,7 @@ class PortTestServer {
         });
     }
 
-    async function stopListening(port) {
+    stopListening(port) {
         return new Promise((resolve, reject) => {
             if (!this.servers[port]) {
                 return resolve({ success: false, error: 'No server running on this port' });
@@ -548,7 +548,7 @@ class PortTestServer {
         });
     }
 
-    async function testPort(port, protocol = 'tcp') {
+    testPort(port, protocol = 'tcp') {
         return new Promise((resolve) => {
             const client = new net.Socket();
             const timeout = setTimeout(() => {

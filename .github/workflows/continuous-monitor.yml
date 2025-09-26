@@ -1,0 +1,86 @@
+name: Continuous Port Monitor
+
+on:
+  schedule:
+    # Run every 2 minutes
+    - cron: '*/2 * * * *'
+  workflow_dispatch:
+
+env:
+  TARGET_SERVER: 147.93.113.37
+  DASHBOARD_URL: http://147.93.113.37:9090
+  MAX_RETRIES: 10
+
+jobs:
+  continuous-test:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        port: [22, 80, 443, 3000, 3001, 8080, 8001, 8889, 9090]
+
+    steps:
+    - name: Test Port ${{ matrix.port }}
+      id: test
+      run: |
+        echo "Testing port ${{ matrix.port }} on ${{ env.TARGET_SERVER }}"
+
+        # Test port connectivity
+        timeout 5 bash -c "cat < /dev/null > /dev/tcp/${{ env.TARGET_SERVER }}/${{ matrix.port }}" 2>/dev/null
+
+        if [ $? -eq 0 ]; then
+          echo "✅ Port ${{ matrix.port }} is OPEN"
+          echo "::set-output name=status::open"
+        else
+          echo "❌ Port ${{ matrix.port }} is CLOSED"
+          echo "::set-output name=status::closed"
+          exit 1
+        fi
+
+    - name: Attempt Fix if Closed
+      if: failure()
+      run: |
+        echo "Attempting to fix port ${{ matrix.port }}..."
+
+        # Try to restart service via dashboard API
+        curl -X POST "${{ env.DASHBOARD_URL }}/api/listen" \
+          -H "Content-Type: application/json" \
+          -d '{"port": ${{ matrix.port }}, "protocol": "http"}' \
+          --max-time 10 || true
+
+        sleep 5
+
+        # Retest
+        timeout 5 bash -c "cat < /dev/null > /dev/tcp/${{ env.TARGET_SERVER }}/${{ matrix.port }}" 2>/dev/null
+
+        if [ $? -eq 0 ]; then
+          echo "✅ Port ${{ matrix.port }} is now OPEN after fix"
+        else
+          echo "❌ Port ${{ matrix.port }} still CLOSED after fix attempt"
+        fi
+
+  aggregate-results:
+    needs: continuous-test
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+    - name: Check overall status
+      run: |
+        echo "Aggregating test results..."
+
+        # This would normally aggregate all matrix job results
+        # and create a summary report
+
+        if [ "${{ needs.continuous-test.result }}" == "success" ]; then
+          echo "✅ All ports are operational"
+        else
+          echo "⚠️ Some ports need attention"
+
+          # Trigger recursive fix workflow
+          curl -X POST \
+            -H "Authorization: token ${{ github.token }}" \
+            -H "Accept: application/vnd.github.everest-preview+json" \
+            https://api.github.com/repos/${{ github.repository }}/actions/workflows/recursive-fix.yml/dispatches \
+            -d '{"ref":"main"}'
+        fi

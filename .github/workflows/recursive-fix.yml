@@ -1,0 +1,219 @@
+name: Recursive Port Fix
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [fix_ports]
+
+env:
+  TARGET_SERVER: 147.93.113.37
+  MAX_ITERATIONS: 100
+  RETRY_DELAY: 10
+
+jobs:
+  recursive-fix-loop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.x'
+
+    - name: Install dependencies
+      run: |
+        pip install requests pyyaml
+        sudo apt-get install -y netcat nmap
+
+    - name: Recursive Fix Loop
+      run: |
+        python3 - << 'PYTHON_SCRIPT'
+        import socket
+        import time
+        import requests
+        import json
+        import sys
+        from datetime import datetime
+
+        SERVER_IP = "147.93.113.37"
+        DASHBOARD_URL = f"http://{SERVER_IP}:9090"
+        MAX_ITERATIONS = 100
+        RETRY_DELAY = 10
+
+        # Target ports that must be working
+        TARGET_PORTS = {
+            22: "SSH",
+            80: "HTTP",
+            443: "HTTPS",
+            3000: "API",
+            3001: "Alt API",
+            8080: "Admin",
+            8001: "Service",
+            8889: "Custom",
+            9090: "Dashboard"
+        }
+
+        def test_port(port, timeout=3):
+            """Test if a port is open"""
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(timeout)
+                result = sock.connect_ex((SERVER_IP, port))
+                sock.close()
+                return result == 0
+            except:
+                return False
+
+        def start_service_on_port(port):
+            """Attempt to start a service on a port via dashboard API"""
+            try:
+                response = requests.post(
+                    f"{DASHBOARD_URL}/api/listen",
+                    json={"port": port, "protocol": "http"},
+                    timeout=10
+                )
+                return response.status_code == 200
+            except:
+                return False
+
+        def test_all_ports():
+            """Test all target ports and return status"""
+            results = {}
+            for port, service in TARGET_PORTS.items():
+                is_open = test_port(port)
+                results[port] = {
+                    "service": service,
+                    "open": is_open,
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+                status = "✅" if is_open else "❌"
+                print(f"  Port {port:5} ({service:10}): {status}")
+            return results
+
+        def fix_closed_ports(closed_ports):
+            """Attempt to fix closed ports"""
+            fixed = []
+            for port in closed_ports:
+                print(f"  Attempting to fix port {port}...")
+
+                # Try to start service
+                if start_service_on_port(port):
+                    time.sleep(2)
+                    # Verify it's now open
+                    if test_port(port):
+                        print(f"    ✅ Port {port} is now OPEN")
+                        fixed.append(port)
+                    else:
+                        print(f"    ❌ Port {port} still CLOSED after service start")
+                else:
+                    print(f"    ❌ Failed to start service on port {port}")
+
+            return fixed
+
+        print("=" * 60)
+        print("RECURSIVE PORT FIX CONTROLLER")
+        print("=" * 60)
+        print(f"Server: {SERVER_IP}")
+        print(f"Max Iterations: {MAX_ITERATIONS}")
+        print(f"Retry Delay: {RETRY_DELAY}s")
+        print("=" * 60)
+
+        # Main recursive loop
+        for iteration in range(1, MAX_ITERATIONS + 1):
+            print(f"\n🔄 ITERATION {iteration}/{MAX_ITERATIONS}")
+            print("-" * 40)
+
+            # Test all ports
+            print("Testing ports...")
+            results = test_all_ports()
+
+            # Find closed ports
+            closed_ports = [port for port, data in results.items() if not data["open"]]
+
+            if not closed_ports:
+                print("\n✅ SUCCESS! All ports are now OPEN!")
+                print("=" * 60)
+
+                # Save successful configuration
+                with open("successful_config.json", "w") as f:
+                    json.dump({
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "iteration": iteration,
+                        "results": results
+                    }, f, indent=2)
+
+                sys.exit(0)
+
+            print(f"\n⚠️ {len(closed_ports)} ports need fixing: {closed_ports}")
+
+            # Attempt to fix closed ports
+            fixed = fix_closed_ports(closed_ports)
+
+            if fixed:
+                print(f"✅ Fixed {len(fixed)} ports in this iteration: {fixed}")
+            else:
+                print("❌ No ports were fixed in this iteration")
+
+            if iteration < MAX_ITERATIONS:
+                print(f"\n⏳ Waiting {RETRY_DELAY} seconds before next iteration...")
+                time.sleep(RETRY_DELAY)
+
+        # If we get here, we've exhausted all attempts
+        print("\n" + "=" * 60)
+        print("❌ FAILED: Maximum iterations reached")
+        print(f"Still closed: {closed_ports}")
+        print("=" * 60)
+        sys.exit(1)
+        PYTHON_SCRIPT
+
+    - name: Upload Results
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: recursive-fix-results
+        path: |
+          successful_config.json
+
+    - name: Create Success Comment
+      if: success()
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+
+          // Read the successful configuration
+          let config = {};
+          try {
+            config = JSON.parse(fs.readFileSync('successful_config.json', 'utf8'));
+          } catch (e) {
+            console.log('No config file found');
+          }
+
+          const body = `## ✅ All Ports Successfully Opened!
+
+          The recursive fix process has successfully opened all target ports.
+
+          **Details:**
+          - Iterations needed: ${config.iteration || 'unknown'}
+          - Timestamp: ${config.timestamp || new Date().toISOString()}
+
+          All services are now accessible from external networks.`;
+
+          // Comment on the latest commit
+          const { data: commits } = await github.rest.repos.listCommits({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            per_page: 1
+          });
+
+          if (commits.length > 0) {
+            await github.rest.repos.createCommitComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: commits[0].sha,
+              body: body
+            });
+          }

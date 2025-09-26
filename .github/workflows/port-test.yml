@@ -1,0 +1,284 @@
+name: Recursive Port Testing
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Run every 5 minutes
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      test_mode:
+        description: 'Test mode'
+        required: false
+        default: 'recursive'
+        type: choice
+        options:
+          - recursive
+          - single
+          - continuous
+
+jobs:
+  test-ports:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.x'
+
+    - name: Install dependencies
+      run: |
+        pip install requests
+        sudo apt-get update
+        sudo apt-get install -y nmap netcat curl
+
+    - name: Test ports from GitHub
+      id: port_test
+      run: |
+        echo "🔍 Testing ports on 147.93.113.37 from GitHub Actions"
+
+        # Test common ports
+        python3 - << 'EOF'
+        import socket
+        import json
+        import sys
+        from datetime import datetime
+
+        SERVER_IP = "147.93.113.37"
+
+        # Ports to test
+        ports = {
+            22: "SSH",
+            80: "HTTP",
+            443: "HTTPS",
+            3000: "API",
+            3001: "Alt API",
+            8080: "Admin",
+            8001: "Service",
+            8889: "Custom",
+            9090: "Dashboard",
+            3306: "MySQL",
+            6379: "Redis"
+        }
+
+        results = {}
+        open_ports = []
+        closed_ports = []
+
+        print(f"Testing {len(ports)} ports on {SERVER_IP}")
+        print("=" * 50)
+
+        for port, service in ports.items():
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(3)
+                result = sock.connect_ex((SERVER_IP, port))
+                sock.close()
+
+                is_open = result == 0
+                status = "✅ OPEN" if is_open else "❌ CLOSED"
+
+                print(f"Port {port:5} ({service:10}): {status}")
+
+                results[port] = {
+                    "service": service,
+                    "open": is_open,
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+
+                if is_open:
+                    open_ports.append(port)
+                else:
+                    closed_ports.append(port)
+
+            except Exception as e:
+                print(f"Error testing port {port}: {e}")
+                results[port] = {
+                    "service": service,
+                    "open": False,
+                    "error": str(e)
+                }
+                closed_ports.append(port)
+
+        print("\n" + "=" * 50)
+        print(f"Summary: {len(open_ports)}/{len(ports)} ports open")
+
+        # Write results to file
+        with open("port_results.json", "w") as f:
+            json.dump(results, f, indent=2)
+
+        # Set GitHub output
+        print(f"::set-output name=open_count::{len(open_ports)}")
+        print(f"::set-output name=closed_count::{len(closed_ports)}")
+        print(f"::set-output name=open_ports::{','.join(map(str, open_ports))}")
+        print(f"::set-output name=closed_ports::{','.join(map(str, closed_ports))}")
+
+        # Exit with error if not all ports are open
+        if closed_ports:
+            print(f"\n⚠️ {len(closed_ports)} ports are closed and need attention:")
+            for port in closed_ports:
+                print(f"  - Port {port} ({ports[port]})")
+            sys.exit(1)
+        else:
+            print("\n✅ All ports are open and accessible!")
+            sys.exit(0)
+        EOF
+
+    - name: Test HTTP endpoints
+      if: always()
+      run: |
+        echo "Testing HTTP endpoints..."
+
+        # Test dashboard
+        curl -f -m 10 http://147.93.113.37:9090/health || echo "Dashboard not accessible"
+
+        # Test API
+        curl -f -m 10 http://147.93.113.37:3000/health || echo "API not accessible"
+
+        # Test admin
+        curl -f -m 10 http://147.93.113.37:8080 || echo "Admin not accessible"
+
+    - name: Run nmap scan
+      if: always()
+      run: |
+        echo "Running nmap scan..."
+        nmap -Pn -p 22,80,443,3000-3001,8000-8889,9090 147.93.113.37
+
+    - name: Create issue if ports are closed
+      if: failure()
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          const results = JSON.parse(fs.readFileSync('port_results.json', 'utf8'));
+
+          let issueBody = '## 🚨 Port Connectivity Alert\n\n';
+          issueBody += 'Some ports are not accessible from external network:\n\n';
+
+          const closedPorts = [];
+          for (const [port, data] of Object.entries(results)) {
+            if (!data.open) {
+              closedPorts.push(`- Port ${port} (${data.service})`);
+            }
+          }
+
+          issueBody += closedPorts.join('\n');
+          issueBody += '\n\n### Suggested Actions:\n';
+          issueBody += '1. Check firewall rules\n';
+          issueBody += '2. Verify services are running\n';
+          issueBody += '3. Check server logs\n';
+          issueBody += '\n[View Full Test Results](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})';
+
+          // Check for existing issue
+          const issues = await github.rest.issues.listForRepo({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            state: 'open',
+            labels: 'port-alert'
+          });
+
+          if (issues.data.length === 0) {
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `🚨 Port Connectivity Issue - ${new Date().toISOString().split('T')[0]}`,
+              body: issueBody,
+              labels: ['port-alert', 'automated']
+            });
+          }
+
+    - name: Upload test results
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: port-test-results
+        path: |
+          port_results.json
+
+  recursive-fix:
+    runs-on: ubuntu-latest
+    needs: test-ports
+    if: failure()
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Attempt to restart services
+      run: |
+        echo "Attempting to restart services via SSH or API..."
+
+        # This would normally SSH into the server or call an API
+        # to restart services, but requires credentials
+
+        python3 - << 'EOF'
+        import requests
+        import time
+
+        SERVER = "147.93.113.37"
+        MAX_ATTEMPTS = 5
+        PORTS_TO_FIX = [3000, 8080, 9090]
+
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            print(f"\nAttempt {attempt}/{MAX_ATTEMPTS}")
+
+            for port in PORTS_TO_FIX:
+                try:
+                    # Try to start service via API
+                    response = requests.post(
+                        f"http://{SERVER}:9090/api/listen",
+                        json={"port": port, "protocol": "http"},
+                        timeout=10
+                    )
+
+                    if response.ok:
+                        print(f"✅ Started service on port {port}")
+                    else:
+                        print(f"❌ Failed to start service on port {port}")
+
+                except Exception as e:
+                    print(f"Error starting service on port {port}: {e}")
+
+            time.sleep(5)
+
+            # Test if ports are now open
+            import socket
+            all_open = True
+
+            for port in PORTS_TO_FIX:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(3)
+                result = sock.connect_ex((SERVER, port))
+                sock.close()
+
+                if result != 0:
+                    all_open = False
+                    print(f"Port {port} still closed")
+
+            if all_open:
+                print("\n✅ All ports successfully opened!")
+                break
+        else:
+            print("\n❌ Failed to open all ports after maximum attempts")
+            exit(1)
+        EOF
+
+  monitor:
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [test-ports]
+
+    steps:
+    - name: Send status to monitoring endpoint
+      run: |
+        # Send status to your monitoring service
+        curl -X POST https://api.github.com/repos/${{ github.repository }}/dispatches \
+          -H "Authorization: token ${{ github.token }}" \
+          -H "Accept: application/vnd.github.everest-preview+json" \
+          -d '{"event_type":"port_test_complete","client_payload":{"status":"${{ needs.test-ports.result }}"}}'
