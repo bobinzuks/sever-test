@@ -569,7 +569,7 @@ class PortTestServer {
         });
     }
 
-    function getPortStatus() {
+    getPortStatus() {
         const status = {
             serverIP: '147.93.113.37',
             activeServers: {},

@@ -1,0 +1,363 @@
+name: Full Service and Page Test
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: '*/10 * * * *'  # Every 10 minutes
+
+jobs:
+  test-all-services:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.x'
+
+    - name: Install dependencies
+      run: |
+        pip install requests beautifulsoup4 pyyaml
+        sudo apt-get update
+        sudo apt-get install -y curl wget netcat nmap jq
+
+    - name: Test All Ports and Services
+      id: test_services
+      run: |
+        python3 - << 'EOF'
+        import requests
+        import socket
+        import json
+        import time
+        from datetime import datetime
+
+        SERVER_IP = "147.93.113.37"
+
+        # Services to test with their endpoints
+        services = {
+            22: {"name": "SSH", "type": "tcp", "test": "socket"},
+            80: {"name": "HTTP", "type": "http", "test": "web", "endpoints": ["/"]},
+            443: {"name": "HTTPS", "type": "https", "test": "web", "endpoints": ["/"]},
+            3000: {"name": "API Server", "type": "http", "test": "api", "endpoints": ["/", "/health", "/api/status"]},
+            3001: {"name": "Alt API", "type": "http", "test": "api", "endpoints": ["/", "/health"]},
+            3306: {"name": "MySQL", "type": "tcp", "test": "socket"},
+            4000: {"name": "Test Port 1", "type": "http", "test": "web", "endpoints": ["/", "/test"]},
+            5000: {"name": "Test Port 2", "type": "http", "test": "web", "endpoints": ["/", "/test"]},
+            5432: {"name": "PostgreSQL", "type": "tcp", "test": "socket"},
+            6000: {"name": "Test Port 3", "type": "http", "test": "web", "endpoints": ["/", "/test"]},
+            6379: {"name": "Redis", "type": "tcp", "test": "socket"},
+            8000: {"name": "Django", "type": "http", "test": "web", "endpoints": ["/", "/health"]},
+            8001: {"name": "Service", "type": "http", "test": "web", "endpoints": ["/", "/health"]},
+            8081: {"name": "Admin Dashboard", "type": "http", "test": "web", "endpoints": ["/", "/health"]},
+            8443: {"name": "HTTPS Alt", "type": "http", "test": "web", "endpoints": ["/"]},
+            8888: {"name": "Jupyter", "type": "http", "test": "web", "endpoints": ["/"]},
+            8889: {"name": "Custom", "type": "http", "test": "web", "endpoints": ["/", "/health"]},
+            9090: {"name": "Port Dashboard", "type": "http", "test": "web", "endpoints": ["/", "/health", "/api/ports", "/api/status"]},
+            27017: {"name": "MongoDB", "type": "tcp", "test": "socket"}
+        }
+
+        results = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "server": SERVER_IP,
+            "total_services": len(services),
+            "services_tested": [],
+            "passed": 0,
+            "failed": 0,
+            "warnings": 0
+        }
+
+        def test_socket(port):
+            """Test if port is open"""
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(5)
+                result = sock.connect_ex((SERVER_IP, port))
+                sock.close()
+                return result == 0
+            except:
+                return False
+
+        def test_http_endpoint(port, endpoint, protocol="http"):
+            """Test HTTP/HTTPS endpoint"""
+            url = f"{protocol}://{SERVER_IP}:{port}{endpoint}"
+            try:
+                response = requests.get(url, timeout=5, verify=False)
+                return {
+                    "status_code": response.status_code,
+                    "success": response.status_code < 500,
+                    "content_length": len(response.text),
+                    "headers": dict(response.headers)
+                }
+            except requests.exceptions.RequestException as e:
+                return {
+                    "status_code": 0,
+                    "success": False,
+                    "error": str(e)
+                }
+
+        print("=" * 60)
+        print("COMPREHENSIVE SERVICE TESTING FROM GITHUB")
+        print("=" * 60)
+        print(f"Testing {len(services)} services on {SERVER_IP}")
+        print("=" * 60)
+
+        for port, config in services.items():
+            service_name = config["name"]
+            test_type = config["test"]
+
+            print(f"\nTesting Port {port} ({service_name})...")
+
+            service_result = {
+                "port": port,
+                "name": service_name,
+                "type": test_type,
+                "tests": []
+            }
+
+            # Test port connectivity
+            port_open = test_socket(port)
+
+            if port_open:
+                print(f"  ✅ Port {port} is OPEN")
+                service_result["port_status"] = "open"
+
+                # Test HTTP endpoints if applicable
+                if test_type in ["web", "api"] and "endpoints" in config:
+                    protocol = "https" if config["type"] == "https" else "http"
+
+                    for endpoint in config["endpoints"]:
+                        print(f"  Testing endpoint {endpoint}...")
+                        endpoint_result = test_http_endpoint(port, endpoint, protocol)
+
+                        test_result = {
+                            "endpoint": endpoint,
+                            "status": endpoint_result["status_code"],
+                            "success": endpoint_result["success"]
+                        }
+
+                        if endpoint_result["success"]:
+                            print(f"    ✅ {endpoint} - Status {endpoint_result['status_code']}")
+                            if endpoint == "/health" and endpoint_result["status_code"] == 200:
+                                print(f"      Health check passed")
+                        else:
+                            print(f"    ❌ {endpoint} - Failed: {endpoint_result.get('error', 'HTTP ' + str(endpoint_result['status_code']))}")
+
+                        service_result["tests"].append(test_result)
+
+                # Determine overall service status
+                if test_type == "socket" or not service_result["tests"]:
+                    service_result["overall_status"] = "PASS"
+                    results["passed"] += 1
+                else:
+                    failed_tests = [t for t in service_result["tests"] if not t["success"]]
+                    if not failed_tests:
+                        service_result["overall_status"] = "PASS"
+                        results["passed"] += 1
+                    elif len(failed_tests) < len(service_result["tests"]):
+                        service_result["overall_status"] = "PARTIAL"
+                        results["warnings"] += 1
+                    else:
+                        service_result["overall_status"] = "FAIL"
+                        results["failed"] += 1
+            else:
+                print(f"  ❌ Port {port} is CLOSED")
+                service_result["port_status"] = "closed"
+                service_result["overall_status"] = "FAIL"
+                results["failed"] += 1
+
+            results["services_tested"].append(service_result)
+
+        # Generate summary
+        print("\n" + "=" * 60)
+        print("TEST SUMMARY")
+        print("=" * 60)
+        print(f"Total Services: {results['total_services']}")
+        print(f"✅ Passed: {results['passed']}")
+        print(f"⚠️  Warnings: {results['warnings']}")
+        print(f"❌ Failed: {results['failed']}")
+
+        # List failures
+        if results["failed"] > 0:
+            print("\n❌ FAILED SERVICES:")
+            for service in results["services_tested"]:
+                if service["overall_status"] == "FAIL":
+                    print(f"  - Port {service['port']} ({service['name']})")
+
+        # List warnings
+        if results["warnings"] > 0:
+            print("\n⚠️  PARTIAL FAILURES:")
+            for service in results["services_tested"]:
+                if service["overall_status"] == "PARTIAL":
+                    print(f"  - Port {service['port']} ({service['name']})")
+                    for test in service["tests"]:
+                        if not test["success"]:
+                            print(f"    Failed: {test['endpoint']}")
+
+        # Save results
+        with open("test_results.json", "w") as f:
+            json.dump(results, f, indent=2)
+
+        # Set GitHub Actions output
+        print(f"::set-output name=passed::{results['passed']}")
+        print(f"::set-output name=failed::{results['failed']}")
+        print(f"::set-output name=warnings::{results['warnings']}")
+
+        # Exit with error if any failures
+        if results["failed"] > 0:
+            print("\n❌ Some services are not working properly!")
+            exit(1)
+        elif results["warnings"] > 0:
+            print("\n⚠️  Some services have partial failures")
+            exit(0)
+        else:
+            print("\n✅ All services are working perfectly!")
+            exit(0)
+        EOF
+
+    - name: Test Dashboard Functionality
+      if: always()
+      run: |
+        echo "Testing Port Dashboard at http://147.93.113.37:9090"
+
+        # Test dashboard API
+        curl -s http://147.93.113.37:9090/api/status | jq . || echo "Dashboard API not accessible"
+
+        # Test port scanning endpoint
+        curl -X POST http://147.93.113.37:9090/api/test-port \
+          -H "Content-Type: application/json" \
+          -d '{"port": 3000}' || echo "Port test API failed"
+
+    - name: Performance Test
+      if: always()
+      run: |
+        echo "Running performance tests..."
+
+        # Test response times
+        for port in 3000 8000 8081 9090; do
+          echo "Testing response time for port $port..."
+          time curl -s -o /dev/null -w "%{time_total}\n" http://147.93.113.37:$port || true
+        done
+
+    - name: Security Headers Check
+      if: always()
+      run: |
+        echo "Checking security headers..."
+
+        for port in 80 443 3000 8000 8081; do
+          echo "Port $port headers:"
+          curl -s -I http://147.93.113.37:$port | grep -E "X-Frame-Options|X-Content-Type-Options|X-XSS-Protection" || echo "No security headers found"
+        done
+
+    - name: Create Issue if Services Failed
+      if: failure()
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          let results = {};
+
+          try {
+            results = JSON.parse(fs.readFileSync('test_results.json', 'utf8'));
+          } catch (e) {
+            console.log('No test results file found');
+          }
+
+          let issueBody = '## 🚨 Service Health Alert\n\n';
+          issueBody += 'Some services are not working correctly:\n\n';
+
+          if (results.services_tested) {
+            const failed = results.services_tested.filter(s => s.overall_status === 'FAIL');
+            const warnings = results.services_tested.filter(s => s.overall_status === 'PARTIAL');
+
+            if (failed.length > 0) {
+              issueBody += '### ❌ Failed Services:\n';
+              failed.forEach(s => {
+                issueBody += `- **Port ${s.port}** (${s.name}): ${s.port_status}\n`;
+              });
+            }
+
+            if (warnings.length > 0) {
+              issueBody += '\n### ⚠️ Partial Failures:\n';
+              warnings.forEach(s => {
+                issueBody += `- **Port ${s.port}** (${s.name})\n`;
+                s.tests.forEach(t => {
+                  if (!t.success) {
+                    issueBody += `  - ${t.endpoint}: Failed\n`;
+                  }
+                });
+              });
+            }
+          }
+
+          issueBody += '\n[View Full Test Results](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})';
+
+          // Check for existing issue
+          const issues = await github.rest.issues.listForRepo({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            state: 'open',
+            labels: 'service-health'
+          });
+
+          if (issues.data.length === 0) {
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `🚨 Service Health Alert - ${new Date().toISOString().split('T')[0]}`,
+              body: issueBody,
+              labels: ['service-health', 'automated']
+            });
+          }
+
+    - name: Upload Test Results
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: service-test-results
+        path: test_results.json
+
+    - name: Comment on Latest Commit
+      if: always()
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          let results = {};
+
+          try {
+            results = JSON.parse(fs.readFileSync('test_results.json', 'utf8'));
+          } catch (e) {
+            results = { passed: 0, failed: 0, warnings: 0 };
+          }
+
+          const emoji = results.failed > 0 ? '❌' : results.warnings > 0 ? '⚠️' : '✅';
+          const status = results.failed > 0 ? 'FAILED' : results.warnings > 0 ? 'PARTIAL' : 'PASSED';
+
+          const comment = `## ${emoji} Service Test Results: ${status}
+
+          - ✅ Passed: ${results.passed}
+          - ⚠️ Warnings: ${results.warnings}
+          - ❌ Failed: ${results.failed}
+
+          Tested from GitHub Actions at ${new Date().toISOString()}
+
+          [View Full Report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})`;
+
+          const { data: commits } = await github.rest.repos.listCommits({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            per_page: 1
+          });
+
+          if (commits.length > 0) {
+            await github.rest.repos.createCommitComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: commits[0].sha,
+              body: comment
+            });
+          }
